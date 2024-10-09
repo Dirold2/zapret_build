@@ -6,4 +6,4 @@ sc stop windivert
 net stop "%SRVNAME%"
 sc delete "%SRVNAME%"
 
-echo  ¦¬¨â¥ «î¡ãî ª­®¯ªã çâ®¡ë § ªàëâì ®ª­® . . . & >nul pause & exit /b
+echo ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½â®¡ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ . . . & >nul pause & exit /b

@@ -3,14 +3,13 @@
 set SRVNAME=zapret
 
 echo.
-echo “¤ «ï¥âáï á«ã¦¡  zapret . . .
+echo ÐžÑÑ‚Ð°Ð½Ð¾Ð²ÐºÐ° ÑÐ»ÑƒÐ¶Ð±Ñ‹ zapret . . .
 echo.
 net stop "%SRVNAME%"
 sc delete "%SRVNAME%"
 
-
 echo.
-echo “¤ «ï¥âáï á«ã¦¡  zapret-discord . . .
+echo ÐžÑÑ‚Ð°Ð½Ð¾Ð²ÐºÐ° ÑÐ»ÑƒÐ¶Ð±Ñ‹ zapret-discord . . .
 echo.
 set SRVNAME=zapret-discord
 
@@ -19,4 +18,4 @@ net stop "%SRVNAME%"
 sc delete "%SRVNAME%"
 
 echo.
-echo  ¦¬¨â¥ «î¡ãî ª­®¯ªã çâ®¡ë § ªàëâì ®ª­® . . . & >nul pause & exit
+echo Ð—Ð°Ð´Ð°Ñ‡Ð° Ð·Ð°Ð²ÐµÑ€ÑˆÐµÐ½Ð° ÑƒÑÐ¿ÐµÑˆÐ½Ð¾. ÐÐ°Ð¶Ð¼Ð¸Ñ‚Ðµ Ð»ÑŽÐ±ÑƒÑŽ ÐºÐ»Ð°Ð²Ð¸ÑˆÑƒ . . . & >nul pause & exit
