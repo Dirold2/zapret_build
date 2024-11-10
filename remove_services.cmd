@@ -23,8 +23,12 @@ cls
 echo.
 echo Останавливаем службу zapret . . .
 echo.
-net stop "%SRVNAME%"
-sc delete "%SRVNAME%"
+
+net stop "zapret"
+net delete "zapret"
+
+sc stop zapret
+sc delete zapret
 
 echo.
 echo Ваша работа завершена. Нажмите любую клавишу, чтобы выйти . . . & >nul pause & exit
