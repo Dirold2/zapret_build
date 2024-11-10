@@ -1,3 +1,6 @@
+ntc.party
+rutracker.org
+
 googlevideo.com
 
 i.ytimg.com
@@ -21,38 +24,6 @@ yt-video-upload.l.google.com
 wide-youtube.l.google.com
 play.google.com
 accounts.google.com
-ntc.party
-rutracker.org
 
 api.spotify.com
 dealer.spotify.com
-
-dis.gd
-discord.co
-discord.com
-discord.design
-discord.dev
-discord.gg
-discord.gift
-discord.gifts
-discord.media
-discord.new
-discord.store
-discord.tools
-discordapp.com
-discordapp.net
-discordapp.io
-discordcdn.com
-discordmerch.com
-discordpartygames.com
-discord-activities.com
-discordactivities.com
-discordsays.com
-discordstatus.com
-discord-attachments-uploads-prd.storage.googleapis.com
-cdn.discordapp.com
-*.discord.com
-*.discord.gg
-*.discordapp.com
-*.discordapp.net
-*.discord.media
