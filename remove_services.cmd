@@ -3,6 +3,14 @@ setlocal enabledelayedexpansion
 
 chcp 65001 > nul
 
+rem Проверка прав администратора
+net session >nul 2>&1
+if %errorlevel% neq 0 (
+    echo Требуются права администратора. Пожалуйста, запустите скрипт от имени администратора.
+    pause
+    exit /b 20
+)
+
 pushd "%~dp0"
 
 echo.

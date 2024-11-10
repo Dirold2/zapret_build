@@ -1,24 +1,25 @@
 @echo off
 setlocal enabledelayedexpansion
 
+:: Flowseal Service Manager
+:: Этот скрипт управляет сервисом Flowseal DPI bypass
+:: Автор: [dirold2]
+:: Дата последнего обновления: [10.11.2024]
+
 chcp 65001 > nul
 
-::Управление запуском сервиса Flowseal
-::Файлы должны находиться в корне - там где расположен батник
-
-::Выводим меню выбора
-echo.
-echo Выберите файл, который хотите выполнить с определенными параметрами (например > запустить на определенных условиях).
-echo Если выбираете, будьте готовы записать, какие именно параметры используются после
-echo.
-pause
-cls
+rem Проверка прав администратора
+net session >nul 2>&1
+if %errorlevel% neq 0 (
+    echo Ошибка: Требуются права администратора.
+    echo Пожалуйста, запустите скрипт от имени администратора.
+    pause
+    exit /b 1
+)
 
 pushd "%~dp0"
 
-set BIN_PATH=%~dp0zapret\zapret-winws\
-
-::Ищем .bat файлы в текущей директории, исключая файлы, начинающиеся с "service"
+rem Ищем .bat файлы в текущей директории, исключая файлы, начинающиеся с "service"
 set "count=0"
 for %%f in (*.bat) do (
     set "filename=%%~nxf"
@@ -29,20 +30,38 @@ for %%f in (*.bat) do (
     )
 )
 
-:: Выбор файла
+
+rem Выводим меню выбора
+echo.
 set "choice=bat/"
-set /p "choice=Введите номер файла: "
+set /p "choice=Введите номер файла или 'q' для выхода: "
+
+if /i "%choice%"=="q" (
+    exit /b 0
+)
+
+cls
+
+set BIN_PATH=%~dp0zapret\zapret-winws\
 
 if "!choice!"=="" goto :eof
 
 set "selectedFile=!file%choice%!"
 if not defined selectedFile (
-    echo Ошибка входа, завершение.
+    echo Ошибка: Неверный выбор файла.
+    echo Пожалуйста, запустите скрипт снова и выберите корректный номер.
     pause
-    goto :eof
+    exit /b 1
 )
 
-:: Настраиваем параметры
+if not exist "!selectedFile!" (
+    echo Ошибка: Файл !selectedFile! не найден.
+    echo Пожалуйста, убедитесь, что файл существует и запустите скрипт снова.
+    pause
+    exit /b 1
+)
+
+rem  Настраиваем параметры
 set "args="
 set "capture=0"
 set QUOTE="
@@ -90,16 +109,47 @@ for /f "tokens=*" %%a in ('type "!selectedFile!"') do (
     )
 )
 
-:: Завершаем настройку параметров
+rem  Завершаем настройку параметров
 set ARGS=%args%
-echo Итоговые параметры: !ARGS!
+echo.
+echo Итоговые параметры:
+echo -------------------
+echo !ARGS!
+echo -------------------
+echo.
+
+set /p "confirm=Вы уверены, что хотите продолжить? (Y/n): "
+if /i "%confirm%"=="n" (
+    echo Операция отменена пользователем.
+    pause
+    exit /b 0
+)
 
 set SRVNAME=zapret
 
-net stop %SRVNAME%
-sc delete %SRVNAME%
+net stop %SRVNAME% 2>nul
+if %errorlevel% neq 0 echo Предупреждение: Не удалось остановить сервис. Возможно, он не был запущен.
+
+sc delete %SRVNAME% 2>nul
+if %errorlevel% neq 0 echo Предупреждение: Не удалось удалить сервис. Возможно, он не существовал.
+
 sc create %SRVNAME% binPath="\"%BIN_PATH%winws.exe\" %ARGS%" DisplayName="zapret DPI bypass" start=auto
+if %errorlevel% neq 0 (
+    echo Ошибка: Не удалось создать сервис.
+    pause
+    exit /b 1
+)
+
 sc description %SRVNAME% "zapret DPI bypass software"
+if %errorlevel% neq 0 echo Предупреждение: Не удалось установить описание сервиса.
+
 sc start %SRVNAME%
+if %errorlevel% neq 0 (
+    echo Ошибка: Не удалось запустить сервис.
+    pause
+    exit /b 1
+)
+
+echo Сервис успешно настроен и запущен.
 
 pause

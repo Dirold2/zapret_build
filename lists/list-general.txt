@@ -7,6 +7,9 @@ i.ytimg.com
 ntc.party
 rutracker.org
 
+api.spotify.com
+dealer.spotify.com
+
 dis.gd
 discord.co
 discord.com
@@ -30,6 +33,7 @@ discordactivities.com
 discordsays.com
 discordstatus.com
 discord-attachments-uploads-prd.storage.googleapis.com
+cdn.discordapp.com
 *.discord.com
 *.discord.gg
 *.discordapp.com
