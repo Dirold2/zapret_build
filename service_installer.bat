@@ -86,7 +86,6 @@ rem Функция для проверки и обновления файлов
 call :check_and_backup "list-discord.txt" "0d9543e5c7fae7af78a13300b613f5e9"
 call :check_and_backup "list-discord-ip.txt" "6c87b8887b350e3edf7d0b447425c13e"
 call :check_and_backup "list-youtube.txt" "98d1e6c4471cd1cdf4362a403e2fa405"
-call :check_and_backup "list-global.txt" "b261a8c7f5ec35ed6332f9ef4f4f8f74"
 
 echo Обновление файлов завершено.
 goto :eof
