@@ -10,6 +10,13 @@ discord.media
 discord.new
 discord.store
 discord.tools
+
+cdn.discordapp.com/avatars/
+cdn.discordapp.com
+
+vencord.dev
+badges.vencord.dev
+
 discordapp.com
 discordapp.net
 discordapp.io
@@ -22,9 +29,10 @@ discordsays.com
 discordstatus.com
 discord-attachments-uploads-prd.storage.googleapis.com
 images-ext-1.discordapp.net
-cdn.discordapp.com
+
 *.discord.com
 *.discord.gg
 *.discordapp.com
 *.discordapp.net
 *.discord.media
+*.vencord.dev

@@ -53,9 +53,12 @@ NFT_TABLE=blockcheck
 
 DNSCHECK_DNS=${DNSCHECK_DNS:-8.8.8.8 1.1.1.1 77.88.8.1}
 DNSCHECK_DOM=${DNSCHECK_DOM:-pornhub.com ntc.party rutracker.org www.torproject.org bbc.com}
+DOH_SERVERS=${DOH_SERVERS:-"https://cloudflare-dns.com/dns-query https://dns.google/dns-query https://dns.quad9.net/dns-query https://dns.adguard.com/dns-query https://common.dot.dns.yandex.net/dns-query"}
 DNSCHECK_DIG1=/tmp/dig1.txt
 DNSCHECK_DIG2=/tmp/dig2.txt
 DNSCHECK_DIGS=/tmp/digs.txt
+
+IPSET_FILE=/tmp/blockcheck_ipset.txt
 
 unset PF_STATUS
 PF_RULES_SAVE=/tmp/pf-zapret-save.conf
@@ -129,19 +132,22 @@ opf_dvtws_anchor()
 {
 	# $1 - tcp/udp
 	# $2 - port
-	local family=inet
+	# $3 - ip list
+	local iplist family=inet
 	[ "$IPV" = 6 ] && family=inet6
+	make_comma_list iplist "$3"
 	echo "set reassemble no"
-	[ "$1" = tcp ] && echo "pass in quick $family proto $1 from port $2 flags SA/SA divert-packet port $IPFW_DIVERT_PORT no state"
-	echo "pass in  quick $family proto $1 from port $2 no state"
-	echo "pass out quick $family proto $1 to   port $2 divert-packet port $IPFW_DIVERT_PORT no state"
+	[ "$1" = tcp ] && echo "pass in quick $family proto $1 from {$iplist} port $2 flags SA/SA divert-packet port $IPFW_DIVERT_PORT no state"
+	echo "pass in  quick $family proto $1 from {$iplist} port $2 no state"
+	echo "pass out quick $family proto $1 to   {$iplist} port $2 divert-packet port $IPFW_DIVERT_PORT no state"
 	echo "pass"
 }
 opf_prepare_dvtws()
 {
 	# $1 - tcp/udp
 	# $2 - port
-	opf_dvtws_anchor $1 $2 | pfctl -qf -
+	# $3 - ip list
+	opf_dvtws_anchor $1 $2 "$3" | pfctl -qf -
 	pfctl -qe
 }
 
@@ -201,6 +207,35 @@ nft_has_nfq()
 	}
 	return $res
 }
+
+doh_resolve()
+{
+	# $1 - ip version 4/6
+	# $2 - hostname
+	# $3 - doh server URL. use $DOH_SERVER if empty
+	$MDIG --family=$1 --dns-make-query=$2 | curl -s --data-binary @- -H "Content-Type: application/dns-message" "${3:-$DOH_SERVER}" | $MDIG --dns-parse-query
+}
+doh_find_working()
+{
+	local doh
+
+	[ -n "$DOH_SERVER" ] && return 0
+	echo "* searching working DoH server"
+	DOH_SERVER=
+	for doh in $DOH_SERVERS; do
+		echo -n "$doh : "
+		if doh_resolve 4 iana.org $doh >/dev/null 2>/dev/null; then
+			echo OK
+			DOH_SERVER="$doh"
+			return 0
+		else
+			echo FAIL
+		fi
+	done
+	echo all DoH servers failed
+	return 1
+}
+
 mdig_vars()
 {
 	# $1 - ip version 4/6
@@ -219,7 +254,11 @@ mdig_cache()
 	mdig_vars "$@"
 	[ -n "$count" ] || {
 		# windows version of mdig outputs 0D0A line ending. remove 0D.
-		ips="$(echo $2 | "$MDIG" --family=$1 | tr -d '\r' | xargs)"
+		if [ "$SECURE_DNS" = 1 ]; then
+			ips="$(echo $2 | doh_resolve $1 $2 | tr -d '\r' | xargs)"
+		else
+			ips="$(echo $2 | "$MDIG" --family=$1 | tr -d '\r' | xargs)"
+		fi
 		[ -n "$ips" ] || return 1
 		count=0
 		for ip in $ips; do
@@ -360,7 +399,7 @@ zp_already_running()
 }
 check_already()
 {
-	echo \* checking already running zapret processes
+	echo \* checking already running DPI bypass processes
 	if zp_already_running; then
 		echo "!!! WARNING. some dpi bypass processes already running !!!"
 		echo "!!! WARNING. blockcheck requires all DPI bypass methods disabled !!!"
@@ -387,7 +426,7 @@ check_prerequisites()
 {
 	echo \* checking prerequisites
 	
-	[ "$UNAME" = Darwin -o -x "$PKTWS" ] && [ "$UNAME" = CYGWIN -o -x "$TPWS" ] && [ -x "$MDIG" ] || {
+	[ "$SKIP_PKTWS" = 1 -o "$UNAME" = Darwin -o -x "$PKTWS" ] && [ "$SKIP_TPWS" = 1 -o "$UNAME" = CYGWIN -o -x "$TPWS" ] && [ -x "$MDIG" ] || {
 		local target
 		case $UNAME in
 			Darwin)
@@ -402,58 +441,62 @@ check_prerequisites()
 	}
 
 	local prog progs='curl'
-	case "$UNAME" in
-		Linux)
-			case "$FWTYPE" in
-				iptables)
-					progs="$progs iptables ip6tables"
-					ipt_has_nfq || {
-						echo NFQUEUE iptables or ip6tables target is missing. pls install modules.
+	[ "$SKIP_PKTWS" = 1 ] || {
+		case "$UNAME" in
+			Linux)
+				case "$FWTYPE" in
+					iptables)
+						ipt_has_nfq || {
+							echo NFQUEUE iptables or ip6tables target is missing. pls install modules.
+							exitp 6
+						}
+						progs="$progs iptables ip6tables"
+						;;
+					nftables)
+						nft_has_nfq || {
+							echo nftables queue support is not available. pls install modules.
+							exitp 6
+						}
+						progs="$progs nft"
+						;;
+				esac
+				;;
+			FreeBSD)
+				freebsd_modules_loaded ipfw ipdivert || {
+					echo ipfw or ipdivert kernel module not loaded
 						exitp 6
-					}
-					;;
-				nftables)
-					nft_has_nfq || {
-						echo nftables queue support is not available. pls install modules.
-						exitp 6
-					}
-					;;
-			esac
-			;;
-		FreeBSD)
-			progs="$progs ipfw"
-			freebsd_modules_loaded ipfw ipdivert || {
-				echo ipfw or ipdivert kernel module not loaded
-				exitp 6
-			}
-			[ "$(sysctl -qn net.inet.ip.fw.enable)" = 0 -o "$(sysctl -qn net.inet6.ip6.fw.enable)" = 0 ] && {
-				echo ipfw is disabled. use : ipfw enable firewall
-				exitp 6
-			}
-			pf_is_avail && {
-				pf_save
-				[ "$SUBSYS" = "pfSense" ] && {
-					# pfsense's ipfw may not work without these workarounds
-					sysctl net.inet.ip.pfil.outbound=ipfw,pf 2>/dev/null
-					sysctl net.inet.ip.pfil.inbound=ipfw,pf 2>/dev/null
-					sysctl net.inet6.ip6.pfil.outbound=ipfw,pf 2>/dev/null
-					sysctl net.inet6.ip6.pfil.inbound=ipfw,pf 2>/dev/null
-					pfctl -qd
-					pfctl -qe
-					pf_restore
 				}
-			}
-			;;
-		OpenBSD|Darwin)
-			progs="$progs pfctl"
-			pf_is_avail || {
-				echo pf is not available
-				exitp 6
-			}
-			# no divert sockets in MacOS
-			[ "$UNAME" = "Darwin" ] && SKIP_PKTWS=1
-			pf_save
-			;;
+				[ "$(sysctl -qn net.inet.ip.fw.enable)" = 0 -o "$(sysctl -qn net.inet6.ip6.fw.enable)" = 0 ] && {
+					echo ipfw is disabled. use : ipfw enable firewall
+					exitp 6
+				}
+				pf_is_avail && {
+					pf_save
+					[ "$SUBSYS" = "pfSense" ] && {
+						# pfsense's ipfw may not work without these workarounds
+						sysctl net.inet.ip.pfil.outbound=ipfw,pf 2>/dev/null
+						sysctl net.inet.ip.pfil.inbound=ipfw,pf 2>/dev/null
+						sysctl net.inet6.ip6.pfil.outbound=ipfw,pf 2>/dev/null
+						sysctl net.inet6.ip6.pfil.inbound=ipfw,pf 2>/dev/null
+						pfctl -qd
+						pfctl -qe
+						pf_restore
+					}
+				}
+				progs="$progs ipfw"
+				;;
+			OpenBSD|Darwin)
+				pf_is_avail || {
+					echo pf is not available
+					exitp 6
+				}
+				pf_save
+				progs="$progs pfctl"
+				;;
+		esac
+	}
+
+	case "$UNAME" in
 		CYGWIN)
 			SKIP_TPWS=1
 			;;
@@ -518,7 +561,7 @@ curl_supports_tls13()
 	[ $? = 2 ] && return 1
 	# curl can have tlsv1.3 key present but ssl library without TLS 1.3 support
 	# this is online test because there's no other way to trigger library incompatibility case
-	$CURL --tlsv1.3 --max-time $CURL_MAX_TIME -Is -o /dev/null https://w3.org 2>/dev/null
+	$CURL --tlsv1.3 --max-time $CURL_MAX_TIME -Is -o /dev/null https://iana.org 2>/dev/null
 	r=$?
 	[ $r != 4 -a $r != 35 ]
 }
@@ -666,13 +709,12 @@ curl_test_http3()
 	curl_with_dig $1 $2 $QUIC_PORT -ISs -A "$USER_AGENT" --max-time $CURL_MAX_TIME_QUIC --http3-only $CURL_OPT "https://$2" -o /dev/null 2>&1
 }
 
-ipt_scheme()
+ipt_aux_scheme()
 {
 	# $1 - 1 - add , 0 - del
 	# $2 - tcp/udp
 	# $3 - port
 
-	IPT_ADD_DEL $1 OUTPUT -t mangle -p $2 --dport $3 -m mark ! --mark $DESYNC_MARK/$DESYNC_MARK -j NFQUEUE --queue-num $QNUM
 	# to avoid possible INVALID state drop
 	[ "$2" = tcp ] && IPT_ADD_DEL $1 INPUT -p $2 --sport $3 ! --syn -j ACCEPT
 	# for strategies with incoming packets involved (autottl)
@@ -688,13 +730,42 @@ ipt_scheme()
 	# raw table may not be present
 	IPT_ADD_DEL $1 OUTPUT -t raw -m mark --mark $DESYNC_MARK/$DESYNC_MARK -j CT --notrack
 }
+ipt_scheme()
+{
+	# $1 - tcp/udp
+	# $2 - port
+	# $3 - ip list
+
+	local ip
+
+	$IPTABLES -t mangle -N blockcheck_output 2>/dev/null
+	$IPTABLES -t mangle -F blockcheck_output
+	IPT OUTPUT -t mangle -j blockcheck_output
+
+	# prevent loop
+	$IPTABLES -t mangle -A blockcheck_output -m mark --mark $DESYNC_MARK/$DESYNC_MARK -j RETURN
+	$IPTABLES -t mangle -A blockcheck_output ! -p $1 -j RETURN
+	$IPTABLES -t mangle -A blockcheck_output -p $1 ! --dport $2 -j RETURN
+
+	for ip in $3; do
+		$IPTABLES -t mangle -A blockcheck_output -d $ip -j NFQUEUE --queue-num $QNUM
+	done
+
+	ipt_aux_scheme 1 $1 $2
+}
 nft_scheme()
 {
 	# $1 - tcp/udp
 	# $2 - port
+	# $3 - ip list
+
+	local iplist ipver=$IPV
+	[ "$IPV" = 6 ] || ipver=
+	make_comma_list iplist $3
+
 	nft add table inet $NFT_TABLE
 	nft "add chain inet $NFT_TABLE postnat { type filter hook output priority 102; }"
-	nft "add rule inet $NFT_TABLE postnat meta nfproto ipv${IPV} $1 dport $2 mark and $DESYNC_MARK != $DESYNC_MARK queue num $QNUM"
+	nft "add rule inet $NFT_TABLE postnat meta nfproto ipv${IPV} $1 dport $2 mark and $DESYNC_MARK != $DESYNC_MARK ip${ipver} daddr {$iplist} queue num $QNUM"
 	# for strategies with incoming packets involved (autottl)
 	nft "add chain inet $NFT_TABLE prenat { type filter hook prerouting priority -102; }"
 	# enable everything generated by nfqws (works only in OUTPUT, not in FORWARD)
@@ -706,23 +777,33 @@ pktws_ipt_prepare()
 {
 	# $1 - tcp/udp
 	# $2 - port
+	# $3 - ip list
+
+	local ip
+
 	case "$FWTYPE" in
 		iptables)
-			ipt_scheme 1 $1 $2
+			ipt_scheme $1 $2 "$3"
 			;;
 		nftables)
-			nft_scheme $1 $2
+			nft_scheme $1 $2 "$3"
 			;;
 		ipfw)
 			# disable PF to avoid interferences
 			pf_is_avail && pfctl -qd
-			IPFW_ADD divert $IPFW_DIVERT_PORT $1 from me to any $2 proto ip${IPV} out not diverted not sockarg
+			for ip in $3; do
+				IPFW_ADD divert $IPFW_DIVERT_PORT $1 from me to $ip $2 proto ip${IPV} out not diverted not sockarg
+			done
 			;;
 		opf)
-			opf_prepare_dvtws $1 $2
+			opf_prepare_dvtws $1 $2 "$3"
 			;;
 		windivert)
 			WF="--wf-l3=ipv${IPV} --wf-${1}=$2"
+			rm -f "$IPSET_FILE"
+			for ip in $3; do
+				echo $ip >>"$IPSET_FILE"
+			done
 			;;
 
 	esac
@@ -731,9 +812,13 @@ pktws_ipt_unprepare()
 {
 	# $1 - tcp/udp
 	# $2 - port
+
 	case "$FWTYPE" in
 		iptables)
-			ipt_scheme 0 $1 $2
+			ipt_aux_scheme 0 $1 $2
+			IPT_DEL OUTPUT -t mangle -j blockcheck_output
+			$IPTABLES -t mangle -F blockcheck_output 2>/dev/null
+			$IPTABLES -t mangle -X blockcheck_output 2>/dev/null
 			;;
 		nftables)
 			nft delete table inet $NFT_TABLE 2>/dev/null
@@ -747,6 +832,7 @@ pktws_ipt_unprepare()
 			;;
 		windivert)
 			unset WF
+			rm -f "$IPSET_FILE"
 			;;
 	esac
 }
@@ -754,21 +840,35 @@ pktws_ipt_unprepare()
 pktws_ipt_prepare_tcp()
 {
 	# $1 - port
+	# $2 - ip list
 
-	pktws_ipt_prepare tcp $1
+	local ip iplist ipver
 
+	pktws_ipt_prepare tcp $1 "$2"
+
+	# for autottl mode
 	case "$FWTYPE" in
 		iptables)
-			# for autottl
-			IPT INPUT -t mangle -p tcp --sport $1 -m connbytes --connbytes-dir=original --connbytes-mode=packets --connbytes 1:1 -j NFQUEUE --queue-num $QNUM
+			$IPTABLES -N blockcheck_input -t mangle 2>/dev/null
+			$IPTABLES -F blockcheck_input -t mangle 2>/dev/null
+			IPT INPUT -t mangle -j blockcheck_input
+			$IPTABLES -t mangle -A blockcheck_input ! -p tcp -j RETURN
+			$IPTABLES -t mangle -A blockcheck_input -p tcp ! --sport $1 -j RETURN
+			$IPTABLES -t mangle -A blockcheck_input -p tcp ! --tcp-flags SYN,ACK SYN,ACK -j RETURN
+			for ip in $2; do
+				$IPTABLES -A blockcheck_input -t mangle -s $ip -j NFQUEUE --queue-num $QNUM
+			done
 			;;
 		nftables)
-			# for autottl
-			nft "add rule inet $NFT_TABLE prenat meta nfproto ipv${IPV} tcp sport $1 ct original packets 1 queue num $QNUM"
+			ipver=$IPV
+			[ "$IPV" = 6 ] || ipver=
+			make_comma_list iplist $2
+			nft "add rule inet $NFT_TABLE prenat meta nfproto ipv${IPV} tcp sport $1 tcp flags & (syn | ack) == (syn | ack) ip${ipver} saddr {$iplist} queue num $QNUM"
 			;;
 		ipfw)
-			# for autottl mode
-			IPFW_ADD divert $IPFW_DIVERT_PORT tcp from any $1 to me proto ip${IPV} tcpflags syn,ack in not diverted not sockarg
+			for ip in $2; do
+				IPFW_ADD divert $IPFW_DIVERT_PORT tcp from $ip $1 to me proto ip${IPV} tcpflags syn,ack in not diverted not sockarg
+			done
 			;;
 	esac
 }
@@ -780,15 +880,18 @@ pktws_ipt_unprepare_tcp()
 
 	case "$FWTYPE" in
 		iptables)
-			IPT_DEL INPUT -t mangle -p tcp --sport $1 -m connbytes --connbytes-dir=original --connbytes-mode=packets --connbytes 1:1 -j NFQUEUE --queue-num $QNUM
+			IPT_DEL INPUT -t mangle -j blockcheck_input
+			$IPTABLES -t mangle -F blockcheck_input 2>/dev/null
+			$IPTABLES -t mangle -X blockcheck_input 2>/dev/null
 			;;
 	esac
 }
 pktws_ipt_prepare_udp()
 {
 	# $1 - port
+	# $2 - ip list
 
-	pktws_ipt_prepare udp $1
+	pktws_ipt_prepare udp $1 "$2"
 }
 pktws_ipt_unprepare_udp()
 {
@@ -807,7 +910,7 @@ pktws_start()
 			"$DVTWS" --port=$IPFW_DIVERT_PORT "$@" >/dev/null &
 			;;
 		CYGWIN)
-			"$WINWS" $WF "$@" >/dev/null &
+			"$WINWS" $WF --ipset="$IPSET_FILE" "$@" >/dev/null &
 			;;
 	esac
 	PID=$!
@@ -816,7 +919,9 @@ pktws_start()
 }
 tpws_start()
 {
-	"$TPWS" --uid $TPWS_UID:$TPWS_GID --socks --bind-addr=127.0.0.1 --port=$SOCKS_PORT "$@" >/dev/null &
+	local uid
+	[ -n "$HAVE_ROOT" ] && uid="--uid $TPWS_UID:$TPWS_GID"
+	"$TPWS" $uid --socks --bind-addr=127.0.0.1 --port=$SOCKS_PORT "$@" >/dev/null &
 	PID=$!
 	# give some time to initialize
 	minsleep
@@ -905,17 +1010,17 @@ tpws_curl_test()
 	# $1 - test function
 	# $2 - domain
 	# $3,$4,$5, ... - tpws params
-	echo - checking tpws $3 $4 $5 $6 $7 $8 $9 $TPWS_EXTRA "$TPWS_EXTRA_1" "$TPWS_EXTRA_2" "$TPWS_EXTRA_3" "$TPWS_EXTRA_4" "$TPWS_EXTRA_5" "$TPWS_EXTRA_6" "$TPWS_EXTRA_7" "$TPWS_EXTRA_8" "$TPWS_EXTRA_9"
+	echo - checking tpws $3 $4 $5 $6 $7 $8 $9${TPWS_EXTRA:+ $TPWS_EXTRA}${TPWS_EXTRA_1:+ "$TPWS_EXTRA_1"}${TPWS_EXTRA_2:+ "$TPWS_EXTRA_2"}${TPWS_EXTRA_3:+ "$TPWS_EXTRA_3"}${TPWS_EXTRA_4:+ "$TPWS_EXTRA_4"}${TPWS_EXTRA_5:+ "$TPWS_EXTRA_5"}${TPWS_EXTRA_6:+ "$TPWS_EXTRA_6"}${TPWS_EXTRA_7:+ "$TPWS_EXTRA_7"}${TPWS_EXTRA_8:+ "$TPWS_EXTRA_8"}${TPWS_EXTRA_9:+ "$TPWS_EXTRA_9"}
 	local ALL_PROXY="socks5://127.0.0.1:$SOCKS_PORT"
-	ws_curl_test tpws_start "$@" $TPWS_EXTRA "$TPWS_EXTRA_1" "$TPWS_EXTRA_2" "$TPWS_EXTRA_3" "$TPWS_EXTRA_4" "$TPWS_EXTRA_5" "$TPWS_EXTRA_6" "$TPWS_EXTRA_7" "$TPWS_EXTRA_8" "$TPWS_EXTRA_9"
+	ws_curl_test tpws_start "$@"${TPWS_EXTRA:+ $TPWS_EXTRA}${TPWS_EXTRA_1:+ "$TPWS_EXTRA_1"}${TPWS_EXTRA_2:+ "$TPWS_EXTRA_2"}${TPWS_EXTRA_3:+ "$TPWS_EXTRA_3"}${TPWS_EXTRA_4:+ "$TPWS_EXTRA_4"}${TPWS_EXTRA_5:+ "$TPWS_EXTRA_5"}${TPWS_EXTRA_6:+ "$TPWS_EXTRA_6"}${TPWS_EXTRA_7:+ "$TPWS_EXTRA_7"}${TPWS_EXTRA_8:+ "$TPWS_EXTRA_8"}${TPWS_EXTRA_9:+ "$TPWS_EXTRA_9"}
 }
 pktws_curl_test()
 {
 	# $1 - test function
 	# $2 - domain
 	# $3,$4,$5, ... - nfqws/dvtws params
-	echo - checking $PKTWSD ${WF:+$WF }$3 $4 $5 $6 $7 $8 $9 $PKTWS_EXTRA "$PKTWS_EXTRA_1" "$PKTWS_EXTRA_2" "$PKTWS_EXTRA_3" "$PKTWS_EXTRA_4" "$PKTWS_EXTRA_5" "$PKTWS_EXTRA_6" "$PKTWS_EXTRA_7" "$PKTWS_EXTRA_8" "$PKTWS_EXTRA_9"
-	ws_curl_test pktws_start "$@" $PKTWS_EXTRA "$PKTWS_EXTRA_1" "$PKTWS_EXTRA_2" "$PKTWS_EXTRA_3" "$PKTWS_EXTRA_4" "$PKTWS_EXTRA_5" "$PKTWS_EXTRA_6" "$PKTWS_EXTRA_7" "$PKTWS_EXTRA_8" "$PKTWS_EXTRA_9"
+	echo - checking $PKTWSD ${WF:+$WF }$3 $4 $5 $6 $7 $8 $9${PKTWS_EXTRA:+ $PKTWS_EXTRA}${PKTWS_EXTRA_1:+ "$PKTWS_EXTRA_1"}${PKTWS_EXTRA_2:+ "$PKTWS_EXTRA_2"}${PKTWS_EXTRA_3:+ "$PKTWS_EXTRA_3"}${PKTWS_EXTRA_4:+ "$PKTWS_EXTRA_4"}${PKTWS_EXTRA_5:+ "$PKTWS_EXTRA_5"}${PKTWS_EXTRA_6:+ "$PKTWS_EXTRA_6"}${PKTWS_EXTRA_7:+ "$PKTWS_EXTRA_7"}${PKTWS_EXTRA_8:+ "$PKTWS_EXTRA_8"}${PKTWS_EXTRA_9:+ "$PKTWS_EXTRA_9"}
+	ws_curl_test pktws_start "$@"${PKTWS_EXTRA:+ $PKTWS_EXTRA}${PKTWS_EXTRA_1:+ "$PKTWS_EXTRA_1"}${PKTWS_EXTRA_2:+ "$PKTWS_EXTRA_2"}${PKTWS_EXTRA_3:+ "$PKTWS_EXTRA_3"}${PKTWS_EXTRA_4:+ "$PKTWS_EXTRA_4"}${PKTWS_EXTRA_5:+ "$PKTWS_EXTRA_5"}${PKTWS_EXTRA_6:+ "$PKTWS_EXTRA_6"}${PKTWS_EXTRA_7:+ "$PKTWS_EXTRA_7"}${PKTWS_EXTRA_8:+ "$PKTWS_EXTRA_8"}${PKTWS_EXTRA_9:+ "$PKTWS_EXTRA_9"}
 }
 xxxws_curl_test_update()
 {
@@ -1173,7 +1278,7 @@ pktws_check_domain_http_bypass()
 
 	local strategy
 	pktws_check_domain_http_bypass_ "$@"
-	strategy="${strategy:+$strategy $PKTWS_EXTRA $PKTWS_EXTRA_1 $PKTWS_EXTRA_2 $PKTWS_EXTRA_3 $PKTWS_EXTRA_4 $PKTWS_EXTRA_5 $PKTWS_EXTRA_6 $PKTWS_EXTRA_7 $PKTWS_EXTRA_8 $PKTWS_EXTRA_9}"
+	strategy="${strategy:+$strategy${PKTWS_EXTRA:+ $PKTWS_EXTRA}${PKTWS_EXTRA_1:+ "$PKTWS_EXTRA_1"}${PKTWS_EXTRA_2:+ "$PKTWS_EXTRA_2"}${PKTWS_EXTRA_3:+ "$PKTWS_EXTRA_3"}${PKTWS_EXTRA_4:+ "$PKTWS_EXTRA_4"}${PKTWS_EXTRA_5:+ "$PKTWS_EXTRA_5"}${PKTWS_EXTRA_6:+ "$PKTWS_EXTRA_6"}${PKTWS_EXTRA_7:+ "$PKTWS_EXTRA_7"}${PKTWS_EXTRA_8:+ "$PKTWS_EXTRA_8"}${PKTWS_EXTRA_9:+ "$PKTWS_EXTRA_9"}}"
 	report_strategy $1 $3 $PKTWSD
 }
 
@@ -1181,7 +1286,7 @@ pktws_check_domain_http3_bypass_()
 {
 	# $1 - test function
 	# $2 - domain
-	
+
 	local f desync frag tests rep
 
 	for rep in '' 2 5 10 20; do
@@ -1288,7 +1393,7 @@ tpws_check_domain_http_bypass()
 
 	local strategy
 	tpws_check_domain_http_bypass_ "$@"
-	strategy="${strategy:+$strategy $TPWS_EXTRA $TPWS_EXTRA_1 $TPWS_EXTRA_2 $TPWS_EXTRA_3 $TPWS_EXTRA_4 $TPWS_EXTRA_5 $TPWS_EXTRA_6 $TPWS_EXTRA_7 $TPWS_EXTRA_8 $TPWS_EXTRA_9}"
+	strategy="${strategy:+$strategy${TPWS_EXTRA:+ $TPWS_EXTRA}${TPWS_EXTRA_1:+ "$TPWS_EXTRA_1"}${TPWS_EXTRA_2:+ "$TPWS_EXTRA_2"}${TPWS_EXTRA_3:+ "$TPWS_EXTRA_3"}${TPWS_EXTRA_4:+ "$TPWS_EXTRA_4"}${TPWS_EXTRA_5:+ "$TPWS_EXTRA_5"}${TPWS_EXTRA_6:+ "$TPWS_EXTRA_6"}${TPWS_EXTRA_7:+ "$TPWS_EXTRA_7"}${TPWS_EXTRA_8:+ "$TPWS_EXTRA_8"}${TPWS_EXTRA_9:+ "$TPWS_EXTRA_9"}}"
 	report_strategy $1 $3 tpws
 }
 
@@ -1379,7 +1484,7 @@ check_domain_http_tcp()
 	[ "$SKIP_PKTWS" = 1 ] || {
 		echo
 	        echo preparing $PKTWSD redirection
-		pktws_ipt_prepare_tcp $2
+		pktws_ipt_prepare_tcp $2 "$(mdig_resolve_all $IPV $4)"
 
 		pktws_check_domain_http_bypass $1 $3 $4
 
@@ -1402,7 +1507,7 @@ check_domain_http_udp()
 	[ "$SKIP_PKTWS" = 1 ] || {
 		echo
 	        echo preparing $PKTWSD redirection
-		pktws_ipt_prepare_udp $2
+		pktws_ipt_prepare_udp $2 "$(mdig_resolve_all $IPV $3)"
 
 		pktws_check_domain_http3_bypass $1 $3
 
@@ -1605,7 +1710,7 @@ ask_params()
 	SCANLEVEL=${SCANLEVEL:-standard}
 	ask_list SCANLEVEL "quick standard force" "$SCANLEVEL"
 	# disable tpws checks by default in quick mode
-	[ "$SCANLEVEL" = quick -a -z "$SKIP_TPWS" ] && SKIP_TPWS=1
+	[ "$SCANLEVEL" = quick -a -z "$SKIP_TPWS" -a "$UNAME" != Darwin ] && SKIP_TPWS=1
 
 	echo
 
@@ -1677,7 +1782,7 @@ pingtest()
 dnstest()
 {
 	# $1 - dns server. empty for system resolver
-	"$LOOKUP" w3.org $1 >/dev/null 2>/dev/null
+	"$LOOKUP" iana.org $1 >/dev/null 2>/dev/null
 }
 find_working_public_dns()
 {
@@ -1722,9 +1827,13 @@ check_dns_cleanup()
 {
 	rm -f "$DNSCHECK_DIG1" "$DNSCHECK_DIG2" "$DNSCHECK_DIGS" 2>/dev/null
 }
-check_dns()
+check_dns_()
 {
 	local C1 C2 dom
+
+	DNS_IS_SPOOFED=0
+
+	[ "$SKIP_DNSCHECK" = 1 ] && return 0
 
 	echo \* checking DNS
 
@@ -1748,6 +1857,7 @@ check_dns()
 				check_dns_cleanup
 				echo -- POSSIBLE DNS HIJACK DETECTED. ZAPRET WILL NOT HELP YOU IN CASE DNS IS SPOOFED !!!
 				echo -- DNS CHANGE OR DNSCRYPT MAY BE REQUIRED
+				DNS_IS_SPOOFED=1
 				return 1
 			else
 				echo $dom : OK
@@ -1759,8 +1869,8 @@ check_dns()
 		for dom in $DNSCHECK_DOM; do echo $dom; done | "$MDIG" --threads=10 --family=4 >"$DNSCHECK_DIGS"
 	fi
 
-	echo checking resolved IP uniqueness for : $DNSCHECK_DOM
-	echo censor\'s DNS can return equal result for multiple blocked domains.
+	echo "checking resolved IP uniqueness for : $DNSCHECK_DOM"
+	echo "censor's DNS can return equal result for multiple blocked domains."
 	C1=$(wc -l <"$DNSCHECK_DIGS")
 	C2=$(sort -u "$DNSCHECK_DIGS" | wc -l)
 	[ "$C1" -eq 0 ] &&
@@ -1777,6 +1887,7 @@ check_dns()
 		echo -- POSSIBLE DNS HIJACK DETECTED. ZAPRET WILL NOT HELP YOU IN CASE DNS IS SPOOFED !!!
 		echo -- DNSCRYPT MAY BE REQUIRED
 		check_dns_cleanup
+		DNS_IS_SPOOFED=1
 		return 1
 	}
 	echo all resolved IPs are unique
@@ -1786,6 +1897,20 @@ check_dns()
 	return 0
 }
 
+check_dns()
+{
+	local r
+	check_dns_
+	r=$?
+	[ "$DNS_IS_SPOOFED" = 1 ] && SECURE_DNS=${SECURE_DNS:-1}
+	[ "$SECURE_DNS" = 1 ] && {
+		doh_find_working || {
+			echo could not find working DoH server. exiting.
+			exitp 7
+		}
+	}
+	return $r
+}
 
 unprepare_all()
 {
@@ -1818,14 +1943,17 @@ sigsilent()
 	exit 1
 }
 
+
 fsleep_setup
 fix_sbin_path
 check_system
 check_already
-[ "$UNAME" = CYGWIN ] || require_root
+# no divert sockets in MacOS
+[ "$UNAME" = "Darwin" ] && SKIP_PKTWS=1
+[ "$UNAME" != CYGWIN  -a "$SKIP_PKTWS" != 1 ] && require_root
 check_prerequisites
 trap sigint_cleanup INT
-[ "$SKIP_DNSCHECK" = 1 ] || check_dns
+check_dns
 check_virt
 ask_params
 trap - INT

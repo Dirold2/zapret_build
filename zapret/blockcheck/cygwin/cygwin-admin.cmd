@@ -1,3 +1,3 @@
 @echo off
 set TERM=
-cd /d "%~dp0bin" && wscript ..\..\tools\elevator.vbs .\bash --login -i
+cd /d "bin" && "..\tools\elevator" .\bash --login -i
